@@ -5,9 +5,13 @@
     <title>KUI 节点管理面板</title>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 关键修复：在 Vue 挂载前隐藏所有带 v-cloak 的元素，防止错乱闪烁 */
+        [v-cloak] { display: none !important; }
+    </style>
 </head>
 <body class="bg-gray-50 p-8 text-gray-800">
-    <div id="app" class="max-w-3xl mx-auto mt-10">
+    <div id="app" v-cloak class="max-w-3xl mx-auto mt-10">
         
         <div v-if="!isLoggedIn" class="bg-white p-8 rounded shadow max-w-sm mx-auto">
             <h2 class="text-2xl font-bold mb-6 text-center">KUI 安全登录</h2>
@@ -68,7 +72,6 @@
                 const nodes = ref([]);
                 const form = ref({ name: '', vps_ip: '', protocol: 'VLESS', port: 443 });
                 
-                // 获取当前页面的域名，用于生成对接命令
                 const currentDomain = window.location.origin;
 
                 const checkAuth = () => {
@@ -102,7 +105,6 @@
                     password.value = '';
                 };
 
-                // 统一的请求方法，带上鉴权 Token
                 const fetchApi = async (url, options = {}) => {
                     options.headers = { ...options.headers, 'Authorization': token.value };
                     const res = await fetch(url, options);
@@ -138,10 +140,9 @@
                     }
                 };
 
-                // 生成一键安装命令
+                // 关键修复：去掉了多余的转义符，使用标准的 JS 模板字符串
                 const generateCommand = (ip) => {
-                    // 这里默认你将来的脚本会放在 xiaok/KUI 仓库里
-                    return \`bash <(curl -sL https://raw.githubusercontent.com/xiaok/KUI/main/vps/kui.sh) --api "\${currentDomain}" --ip "\${ip}"\`;
+                    return `bash <(curl -sL https://raw.githubusercontent.com/xiaok/KUI/main/vps/kui.sh) --api "${currentDomain}" --ip "${ip}"`;
                 };
 
                 const copyCommand = (text) => {
