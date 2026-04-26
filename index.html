@@ -69,12 +69,24 @@
                                     <div class="w-full bg-gray-200 rounded-full h-1 mt-1"><div class="bg-black h-1 rounded-full" :style="{ width: (vps.mem || 0) + '%' }"></div></div>
                                 </div>
                             </div>
-                            <div class="bg-indigo-50 border border-indigo-100 p-2 rounded flex items-center gap-2">
-                                <div class="text-indigo-600">📺</div>
-                                <div class="flex-1">
-                                    <input v-model="vps.unlock_proxy" placeholder="流媒体解锁代理 (填Socks5地址, 例如 127.0.0.1:40000)" class="w-full bg-transparent border-b border-indigo-200 outline-none text-xs text-indigo-900 placeholder-indigo-300 pb-1">
+                            
+                            <div class="bg-indigo-50 border border-indigo-100 p-3 rounded flex flex-col gap-2 mt-2">
+                                <div class="flex items-center gap-2">
+                                    <div class="text-indigo-600">📺</div>
+                                    <div class="text-xs font-bold text-indigo-900 flex-1">流媒体 / AI 智能解锁方案</div>
+                                    <button @click="saveUnlock(vps)" class="text-[10px] bg-indigo-600 text-white px-3 py-1.5 rounded hover:bg-indigo-700 font-bold transition shadow-sm">下发路由</button>
                                 </div>
-                                <button @click="saveUnlock(vps)" class="text-[10px] bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">保存路由</button>
+                                <div class="flex gap-2">
+                                    <select v-model="vps.unlock_type" @change="vps.unlock_proxy = vps.unlock_type === 'custom' ? '' : vps.unlock_type" class="w-1/2 text-xs border border-indigo-200 p-1.5 rounded bg-white outline-none text-indigo-800">
+                                        <option value="">🚫 停用解锁 (直连出站)</option>
+                                        <option value="auto_warp">⚡ 自动部署本机 WARP (推荐)</option>
+                                        <option value="custom">🌐 自定义外部解锁节点</option>
+                                    </select>
+                                    <input v-if="vps.unlock_type === 'custom' || (vps.unlock_proxy && vps.unlock_proxy !== 'auto_warp')" 
+                                           v-model="vps.unlock_proxy" 
+                                           placeholder="例如: 192.168.1.100:40000" 
+                                           class="w-1/2 bg-white border border-indigo-200 p-1.5 rounded outline-none text-xs text-indigo-900 placeholder-indigo-300">
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -239,6 +251,10 @@
                         servers.value = data.servers || [];
                         nodes.value = data.nodes || [];
                         servers.value.forEach(s => {
+                            if (!s.unlock_proxy) s.unlock_type = "";
+                            else if (s.unlock_proxy === "auto_warp") s.unlock_type = "auto_warp";
+                            else s.unlock_type = "custom";
+                            
                             if(!newNodeParams[s.ip]) {
                                 newNodeParams[s.ip] = { protocol: 'VLESS', port: 443, sni: 'www.apple.com', relay_type: 'external', traffic_limit_gb: '', expire_date: '' };
                             }
@@ -255,10 +271,10 @@
                     if(confirm('删除机器将清理其下所有节点配置！')) { await fetchApi('/api/vps?ip=' + ip, { method: 'DELETE' }); refreshData(); }
                 };
                 
-                // 保存解锁路由配置
                 const saveUnlock = async (vps) => {
-                    await fetchApi('/api/vps', { method: 'PUT', body: JSON.stringify({ ip: vps.ip, unlock_proxy: vps.unlock_proxy }) });
-                    alert('路由配置已保存，Agent 将在一分钟内应用分流！');
+                    const valToSave = vps.unlock_type === 'auto_warp' ? 'auto_warp' : (vps.unlock_proxy || '');
+                    await fetchApi('/api/vps', { method: 'PUT', body: JSON.stringify({ ip: vps.ip, unlock_proxy: valToSave }) });
+                    alert('路由配置已保存，Agent 将在一分钟内应用部署！');
                 };
 
                 const getNodesByIp = (ip) => nodes.value.filter(n => n.vps_ip === ip);
