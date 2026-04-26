@@ -104,31 +104,45 @@ def fetch_and_apply_configs():
         pass
     return []
 
+# 【核心修复】：更安全的 WARP 部署机制
 def check_and_deploy_warp():
-    """检测、安装并配置 Cloudflare WARP SOCKS5 代理"""
+    """安全、防卡死的 WARP 部署与状态检查"""
     try:
         if subprocess.run("command -v warp-cli", shell=True, stderr=subprocess.DEVNULL).returncode != 0:
-            print("正在安装 WARP...")
+            print("正在后台静默安装 WARP...")
             install_cmd = """
             apt-get update && apt-get install -y curl gnupg lsb-release
             curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
             echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
             apt-get update && apt-get install -y cloudflare-warp
             """
-            subprocess.run(install_cmd, shell=True, executable='/bin/bash')
+            # 使用 timeout 防止 apt-get 卡死
+            subprocess.run(f"timeout 180 bash -c '{install_cmd}'", shell=True)
             time.sleep(2)
+
+        # 检查是否已安装成功
+        if subprocess.run("command -v warp-cli", shell=True, stderr=subprocess.DEVNULL).returncode != 0:
+            return False
 
         status = subprocess.check_output("warp-cli --accept-tos status", shell=True).decode()
         if "Connected" not in status:
-            print("初始化 WARP SOCKS5...")
+            print("尝试连接 WARP SOCKS5...")
             subprocess.run("warp-cli --accept-tos registration new", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             subprocess.run("warp-cli --accept-tos mode proxy", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             subprocess.run("warp-cli --accept-tos proxy port 40000", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-            subprocess.run("warp-cli --accept-tos connect", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            # 使用 timeout 避免卡在 connecting 状态导致死锁
+            subprocess.run("timeout 10 warp-cli --accept-tos connect", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             time.sleep(3)
+            
+            # 再次检查状态，如果还是没连上，就不要在配置里注入 127.0.0.1:40000，防止断网
+            new_status = subprocess.check_output("warp-cli --accept-tos status", shell=True).decode()
+            if "Connected" not in new_status:
+                print("WARP 连接超时或失败，暂不启用自动解锁")
+                return False
+                
         return True
     except Exception as e:
-        print(f"WARP 部署失败: {e}")
+        print(f"WARP 状态检查异常: {e}")
         return False
 
 def build_singbox_config(nodes, unlock_proxy):
@@ -172,7 +186,6 @@ def build_singbox_config(nodes, unlock_proxy):
         except Exception:
             pass
 
-    # 存储当前活跃的证书，用于后续清理
     active_certs = []
 
     for node in nodes:
@@ -212,7 +225,6 @@ def build_singbox_config(nodes, unlock_proxy):
             singbox_config["inbounds"].append({
                 "type": "hysteria2", "tag": in_tag, "listen": "::", "listen_port": int(node["port"]),
                 "users": [{"password": node["uuid"]}],
-                # 修复点：已彻底移除 up_mbps 和 down_mbps 废弃字段
                 "tls": { "enabled": True, "alpn": ["h3"], "certificate_path": cert_path, "key_path": key_path }
             })
             
@@ -231,7 +243,6 @@ def build_singbox_config(nodes, unlock_proxy):
             
             singbox_config["route"]["rules"].append({ "inbound": [in_tag], "outbound": out_tag })
 
-    # 【新增功能】自动清理已被删除的 HY2 节点证书残留
     try:
         for filename in os.listdir("/opt/kui/"):
             if filename.startswith("hy2_") and filename.endswith(".pem"):
@@ -246,6 +257,7 @@ def build_singbox_config(nodes, unlock_proxy):
         with open(SINGBOX_CONF_PATH, "r") as f:
             old_config_str = f.read()
 
+    # 【核心修复】：避免配置不变时也无脑重启
     if new_config_str != old_config_str:
         with open(SINGBOX_CONF_PATH, "w") as f:
             f.write(new_config_str)
