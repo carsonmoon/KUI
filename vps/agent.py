@@ -3,7 +3,6 @@ import json
 import os
 import time
 import subprocess
-import random
 
 CONF_FILE = "/opt/kui/config.json"
 SINGBOX_CONF_PATH = "/etc/sing-box/config.json"
@@ -96,11 +95,8 @@ def build_singbox_config(nodes):
             cert_path = f"/opt/kui/hy2_{node['id']}_cert.pem"
             key_path = f"/opt/kui/hy2_{node['id']}_key.pem"
             
-            niche_domains = [
-                "www.chiba-u.ac.jp", "www.tsukuba.ac.jp", "www.jma.go.jp",
-                "www.epfl.ch", "www.su.se", "www.tu-berlin.de", "www.cnrs.fr"
-            ]
-            sni = random.choice(niche_domains)
+            # 直接使用云端下发并保存在数据库的 sni (提供备用默认值防报错)
+            sni = node.get("sni", "www.chiba-u.ac.jp") 
 
             if not os.path.exists(cert_path) or not os.path.exists(key_path):
                 cmd = f'openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) -keyout {key_path} -out {cert_path} -days 3650 -subj "/O=GlobalSign/CN={sni}" 2>/dev/null'
