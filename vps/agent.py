@@ -22,7 +22,7 @@ TOKEN = env["token"]
 HEADERS = {
     'Content-Type': 'application/json',
     'Authorization': TOKEN,
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
 }
 
 last_reported_bytes = {}
@@ -104,6 +104,33 @@ def fetch_and_apply_configs():
         pass
     return []
 
+def check_and_deploy_warp():
+    """检测、安装并配置 Cloudflare WARP SOCKS5 代理"""
+    try:
+        if subprocess.run("command -v warp-cli", shell=True, stderr=subprocess.DEVNULL).returncode != 0:
+            print("正在安装 WARP...")
+            install_cmd = """
+            apt-get update && apt-get install -y curl gnupg lsb-release
+            curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+            echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
+            apt-get update && apt-get install -y cloudflare-warp
+            """
+            subprocess.run(install_cmd, shell=True, executable='/bin/bash')
+            time.sleep(2)
+
+        status = subprocess.check_output("warp-cli --accept-tos status", shell=True).decode()
+        if "Connected" not in status:
+            print("初始化 WARP SOCKS5...")
+            subprocess.run("warp-cli --accept-tos registration new", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            subprocess.run("warp-cli --accept-tos mode proxy", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            subprocess.run("warp-cli --accept-tos proxy port 40000", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            subprocess.run("warp-cli --accept-tos connect", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            time.sleep(3)
+        return True
+    except Exception as e:
+        print(f"WARP 部署失败: {e}")
+        return False
+
 def build_singbox_config(nodes, unlock_proxy):
     singbox_config = {
         "log": {"level": "warn"},
@@ -112,32 +139,38 @@ def build_singbox_config(nodes, unlock_proxy):
         "route": {"rules": []}
     }
 
-    # ======== 核心：注入流媒体解锁路由策略 ========
-    if unlock_proxy and ":" in unlock_proxy:
+    proxy_ip = ""
+    proxy_port = 0
+    
+    if unlock_proxy == "auto_warp":
+        if check_and_deploy_warp():
+            proxy_ip = "127.0.0.1"
+            proxy_port = 40000
+    elif unlock_proxy and ":" in unlock_proxy:
         parts = unlock_proxy.strip().split(":")
         try:
             proxy_ip = parts[0]
             proxy_port = int(parts[1])
-            # 添加 Socks5 出站
+        except:
+            pass
+
+    if proxy_ip and proxy_port:
+        try:
             singbox_config["outbounds"].append({
-                "type": "socks",
-                "tag": "media-unlock",
-                "server": proxy_ip,
-                "server_port": proxy_port
+                "type": "socks", "tag": "media-unlock", "server": proxy_ip, "server_port": proxy_port
             })
-            # 无需 geosite.db，直接后缀匹配，轻量高效
             singbox_config["route"]["rules"].append({
                 "domain_suffix": [
                     "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxext.com", "nflxso.net",
                     "disneyplus.com", "bamgrid.com", "dssott.com",
                     "openai.com", "chatgpt.com", "ai.com",
-                    "spotify.com", "hbo.com", "hbomax.com"
+                    "spotify.com", "hbo.com", "hbomax.com",
+                    "youtube.com", "ytimg.com", "googlevideo.com"
                 ],
                 "outbound": "media-unlock"
             })
         except Exception:
             pass
-    # ============================================
 
     for node in nodes:
         in_tag = f"in-{node['id']}"
@@ -190,7 +223,6 @@ def build_singbox_config(nodes, unlock_proxy):
             else:
                 singbox_config["outbounds"].append({ "type": "direct", "tag": out_tag, "override_address": node["target_ip"], "override_port": int(node["target_port"]) })
             
-            # 这里是通用出站，如果前面有 media-unlock 匹配，它会优先走流媒体
             singbox_config["route"]["rules"].append({ "inbound": [in_tag], "outbound": out_tag })
 
     new_config_str = json.dumps(singbox_config, indent=2)
