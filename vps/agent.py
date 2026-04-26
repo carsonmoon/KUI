@@ -104,47 +104,64 @@ def fetch_and_apply_configs():
         pass
     return []
 
+# =====================================================================
+# 🚀 终极版 WARP 自动部署引擎：将我们手动测试成功的命令全部自动化封装
+# =====================================================================
 def check_and_deploy_warp():
-    """安全、防卡死的 WARP 部署与状态检查"""
+    """安全、防卡死、全自动的 WARP 部署与状态维持引擎"""
     try:
+        # 1. 检查是否安装，未安装则执行我们实测成功的 Debian 源添加与安装流程
         if subprocess.run("command -v warp-cli", shell=True, stderr=subprocess.DEVNULL).returncode != 0:
-            print("正在后台静默安装 WARP...")
+            print("正在后台静默拉取官方 GPG 密钥并安装 WARP...")
             install_cmd = """
             apt-get update && apt-get install -y curl gnupg lsb-release
             curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
             echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
             apt-get update && apt-get install -y cloudflare-warp
             """
-            subprocess.run(f"timeout 180 bash -c '{install_cmd}'", shell=True)
-            time.sleep(2)
+            # 执行底层系统命令，并留出足够的时间
+            subprocess.run(install_cmd, shell=True, executable='/bin/bash')
+            time.sleep(3)
 
+        # 二次确认是否安装成功
         if subprocess.run("command -v warp-cli", shell=True, stderr=subprocess.DEVNULL).returncode != 0:
+            print("WARP 核心组件安装失败。")
             return False
 
+        # 2. 检查 WARP 连接状态
         status = subprocess.check_output("warp-cli --accept-tos status", shell=True).decode()
         if "Connected" not in status:
-            print("尝试连接 WARP SOCKS5...")
+            print("WARP 未连接，正在执行强力重置与初始化...")
+            # 暴力清理之前的死连接或无响应状态
+            subprocess.run("warp-cli --accept-tos disconnect", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            subprocess.run("warp-cli --accept-tos registration delete", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            
+            # 重新走完我们测试成功的抢救流程
             subprocess.run("warp-cli --accept-tos registration new", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             subprocess.run("warp-cli --accept-tos mode proxy", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             subprocess.run("warp-cli --accept-tos proxy port 40000", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            # 加上 timeout 防止卡死
             subprocess.run("timeout 10 warp-cli --accept-tos connect", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-            time.sleep(3)
             
+            # 给 5 秒钟让网卡获取 IP 并握手
+            time.sleep(5)
+            
+            # 3. 最终验证
             new_status = subprocess.check_output("warp-cli --accept-tos status", shell=True).decode()
             if "Connected" not in new_status:
-                print("WARP 连接超时或失败，暂不启用自动解锁")
+                print("WARP 握手失败，VPS 网络环境可能存在阻断，将回退为直连模式。")
                 return False
                 
         return True
     except Exception as e:
-        print(f"WARP 状态检查异常: {e}")
+        print(f"WARP 自动部署引擎发生异常: {e}")
         return False
+# =====================================================================
 
 def build_singbox_config(nodes, unlock_proxy):
     singbox_config = {
         "log": {"level": "warn"},
         "inbounds": [],
-        # 默认出站：直连，使用 VPS 真实原生 IP
         "outbounds": [{"type": "direct", "tag": "direct-out"}],
         "route": {"rules": []}
     }
@@ -152,6 +169,7 @@ def build_singbox_config(nodes, unlock_proxy):
     proxy_ip = ""
     proxy_port = 0
     
+    # 这里的逻辑不变：如果云端下发了 auto_warp，就触发自动部署引擎
     if unlock_proxy == "auto_warp":
         if check_and_deploy_warp():
             proxy_ip = "127.0.0.1"
@@ -164,25 +182,17 @@ def build_singbox_config(nodes, unlock_proxy):
         except:
             pass
 
-    # ====================================================
-    # 核心升级：超精准的流媒体与 AI 分流路由引擎
-    # ====================================================
     if proxy_ip and proxy_port:
         try:
-            # 添加 WARP 解锁出站
             singbox_config["outbounds"].append({
                 "type": "socks", "tag": "media-unlock", "server": proxy_ip, "server_port": proxy_port
             })
-            
-            # 精准路由规则：只有以下白名单流量才走 WARP 解锁
             singbox_config["route"]["rules"].append({
                 "domain_suffix": [
-                    # 流媒体系列
                     "netflix.com", "netflix.net", "nflximg.com", "nflximg.net", "nflxvideo.net", "nflxext.com", "nflxso.net",
                     "disneyplus.com", "bamgrid.com", "dssott.com", "disneynow.com", "disneystreaming.com",
                     "hbo.com", "hbomax.com", "hbomaxcdn.com", "max.com",
                     "spotify.com", "scdn.co", "spoti.fi",
-                    # AI 系列
                     "openai.com", "chatgpt.com", "ai.com", "auth0.com", "identrust.com",
                     "anthropic.com", "claude.ai"
                 ],
@@ -193,7 +203,6 @@ def build_singbox_config(nodes, unlock_proxy):
             })
         except Exception:
             pass
-    # ====================================================
 
     active_certs = []
 
