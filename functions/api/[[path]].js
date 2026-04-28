@@ -1,37 +1,23 @@
-// ==========================================
-// 密码学助手函数 (Web Crypto API)
-// ==========================================
 async function sha256(text) {
     const buffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
     return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// 动态签名验证核心逻辑
 async function verifyAuth(authHeader, adminPass) {
     if (!authHeader) return false;
-
-    // 1. 兼容旧机器: 允许使用明文 Token (保证已部署的老机器不断联)
     if (authHeader === adminPass) return true;
-
     const baseKeyHex = await sha256(adminPass);
-    
-    // 2. 兼容新部署的机器: VPS Agent 上只存放密码的 Hash 值
     if (authHeader === baseKeyHex) return true;
 
-    // 3. 拦截处理前端面板的“动态 HMAC Token” (格式: 时间戳.签名)
     const parts = authHeader.split('.');
     if (parts.length !== 2) return false;
     const [timestamp, clientSig] = parts;
-
-    // 防重放攻击: 校验时间戳是否超过 5 分钟 (300000 毫秒)
     if (Date.now() - parseInt(timestamp) > 300000) return false;
 
-    // 服务端重新计算 HMAC 签名进行比对
     const keyBytes = new Uint8Array(baseKeyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
     const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
     const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(timestamp));
     const expectedSig = Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
-
     return clientSig === expectedSig;
 }
 
@@ -40,11 +26,10 @@ export async function onRequest(context) {
     const url = new URL(request.url);
     const method = request.method;
     const action = params.path ? params.path[0] : ''; 
-    
     const ADMIN_PASS = env.ADMIN_PASSWORD || "admin"; 
     const db = env.DB; 
 
-    // --- 1. Agent 通信接口 (上报状态与流量) ---
+    // 1. Agent 上报接口
     if (action === "report" && method === "POST") {
         if (!(await verifyAuth(request.headers.get("Authorization"), ADMIN_PASS))) return new Response("Unauthorized", { status: 401 });
         const data = await request.json(); 
@@ -63,18 +48,16 @@ export async function onRequest(context) {
         if (totalDelta > 0) {
             stmts.push(db.prepare("INSERT INTO traffic_stats (ip, delta_bytes, timestamp) VALUES (?, ?, ?)").bind(data.ip, totalDelta, nowMs));
         }
-        
         if (stmts.length > 0) await db.batch(stmts);
         return Response.json({ success: true });
     }
 
-    // --- 2. Agent 拉取配置接口 ---
+    // 2. Agent 拉取配置接口 (剔除了废弃的 unlock_proxy 逻辑，防止爆错)
     if (action === "config" && method === "GET") {
         if (!(await verifyAuth(request.headers.get("Authorization"), ADMIN_PASS))) return new Response("Unauthorized", { status: 401 });
         const ip = url.searchParams.get("ip");
         const now = Date.now();
         
-        const serverInfo = await db.prepare("SELECT unlock_proxy FROM servers WHERE ip = ?").bind(ip).first();
         const query = `SELECT * FROM nodes WHERE vps_ip = ? AND enable = 1 AND (traffic_limit = 0 OR traffic_used < traffic_limit) AND (expire_time = 0 OR expire_time > ?)`;
         const { results: machineNodes } = await db.prepare(query).bind(ip, now).all();
         
@@ -86,14 +69,13 @@ export async function onRequest(context) {
                 }
             }
         }
-        return Response.json({ success: true, server: serverInfo, configs: machineNodes });
+        return Response.json({ success: true, configs: machineNodes });
     }
 
-    // --- 3. 客户端订阅下发接口 ---
+    // 3. 客户端订阅接口
     if (action === "sub" && method === "GET") {
         const ip = url.searchParams.get("ip");
         const token = url.searchParams.get("token");
-        // 订阅链接使用密码 Hash 作为静态 Token 验证，不在 URL 暴露明文
         const expectedSubToken = await sha256(ADMIN_PASS);
         if (token !== expectedSubToken) return new Response("Invalid Sub Token", { status: 403 });
 
@@ -114,14 +96,13 @@ export async function onRequest(context) {
         return new Response(btoa(unescape(encodeURIComponent(subLinks.join('\n')))), { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }});
     }
 
-    // --- 4. 面板登录接口 ---
+    // 4. 登录接口
     if (action === "login" && method === "POST") {
-        // 使用动态 HMAC 验证器验证前端发来的签名
         if (await verifyAuth(request.headers.get("Authorization"), ADMIN_PASS)) return Response.json({ success: true });
         return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // --- 5. Telegram 失联巡检触发器 (无鉴权，供外部 Cron-job 调用) ---
+    // 5. TG 巡检接口
     if (action === "cron" && method === "GET") {
         const nowMs = Date.now();
         const { results } = await db.prepare(`SELECT ip, name, last_report FROM servers WHERE last_report < ? AND alert_sent = 0`).bind(nowMs - 180000).all();
@@ -141,9 +122,7 @@ export async function onRequest(context) {
         return Response.json({ success: true, alerted: results ? results.length : 0 });
     }
 
-    // ==============================================
-    // 以下全部属于面板私有接口，必须携带有效的动态签名 Header
-    // ==============================================
+    // 鉴权屏障
     if (!(await verifyAuth(request.headers.get("Authorization"), ADMIN_PASS))) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
@@ -159,7 +138,6 @@ export async function onRequest(context) {
         }
         if (action === "vps") {
             if (method === "POST") { await db.prepare("INSERT OR IGNORE INTO servers (ip, name, alert_sent) VALUES (?, ?, 0)").bind((await request.json()).ip, (await request.json()).name).run(); return Response.json({ success: true }); }
-            if (method === "PUT") { const { ip, unlock_proxy } = await request.json(); await db.prepare("UPDATE servers SET unlock_proxy = ? WHERE ip = ?").bind(unlock_proxy, ip).run(); return Response.json({ success: true }); }
             if (method === "DELETE") { await db.prepare("DELETE FROM servers WHERE ip = ?").bind(url.searchParams.get("ip")).run(); return Response.json({ success: true }); }
         }
         if (action === "nodes") {
