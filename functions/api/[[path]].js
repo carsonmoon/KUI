@@ -1,5 +1,5 @@
 // ==========================================
-// KUI 多用户聚合版 - Serverless 后端 API (终极修复版)
+// KUI 多用户聚合版 - Serverless 后端 API (绝对完整修复版)
 // ==========================================
 
 async function sha256(text) {
@@ -85,7 +85,38 @@ export async function onRequest(context) {
         return Response.json({ success: true });
     }
 
-    // 2. 聚合订阅接口 (核心：支持用户维度全量聚合)
+    // 2. 🌟 Agent 拉取配置接口 (找回被误删的灵魂接口，VPS 没它无法上网)
+    if (action === "config" && method === "GET") {
+        if (!(await verifyAuth(request.headers.get("Authorization"), db, env))) return new Response("Unauthorized", { status: 401 });
+        const ip = url.searchParams.get("ip");
+        const now = Date.now();
+        const adminUser = env.ADMIN_USERNAME || "admin";
+
+        // 筛选逻辑：节点正常 AND (所属用户是管理员 OR 所属普通用户状态正常)
+        const query = `
+            SELECT n.* FROM nodes n
+            LEFT JOIN users u ON n.username = u.username
+            WHERE n.vps_ip = ? AND n.enable = 1 
+            AND (n.traffic_limit = 0 OR n.traffic_used < n.traffic_limit)
+            AND (n.expire_time = 0 OR n.expire_time > ?)
+            AND (n.username = ? OR (
+                u.enable = 1 
+                AND (u.traffic_limit = 0 OR u.traffic_used < u.traffic_limit)
+                AND (u.expire_time = 0 OR u.expire_time > ?)
+            ))
+        `;
+        const { results: machineNodes } = await db.prepare(query).bind(ip, now, adminUser, now).all();
+        
+        for (let node of machineNodes) {
+            if (node.protocol === "dokodemo-door" && node.relay_type === "internal") {
+                const targetNode = await db.prepare("SELECT * FROM nodes WHERE id = ?").bind(node.target_id).first();
+                if (targetNode) node.chain_target = { ip: targetNode.vps_ip, port: targetNode.port, protocol: targetNode.protocol, uuid: targetNode.uuid, sni: targetNode.sni, public_key: targetNode.public_key, short_id: targetNode.short_id };
+            }
+        }
+        return Response.json({ success: true, configs: machineNodes });
+    }
+
+    // 3. 聚合订阅接口 (修复：带上服务器美化别名)
     if (action === "sub" && method === "GET") {
         const ip = url.searchParams.get("ip");
         const reqUser = url.searchParams.get("user");
@@ -117,18 +148,20 @@ export async function onRequest(context) {
         if (ip) { query += " AND n.vps_ip = ?"; sqlParams.push(ip); }
 
         const { results } = await db.prepare(query).bind(...sqlParams).all();
-        let subLinks = results.map(node => {
-            const remark = encodeURIComponent(`${node.protocol}_${node.port}`);
-            if (node.protocol === "VLESS") return `vless://${node.uuid}@${node.vps_ip}:${node.port}?encryption=none&security=none&type=tcp#${remark}`;
-            if (node.protocol === "Reality") return `vless://${node.uuid}@${node.vps_ip}:${node.port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${node.sni}&fp=chrome&pbk=${node.public_key}&sid=${node.short_id}&type=tcp&headerType=none#${remark}-Reality`;
-            if (node.protocol === "Hysteria2") return `hysteria2://${node.uuid}@${node.vps_ip}:${node.port}/?insecure=1&sni=${node.sni}#${remark}-Hy2`;
-            return null;
-        }).filter(l => l);
+        let subLinks = [];
+        
+        for (let node of results) {
+            const vpsInfo = await db.prepare("SELECT name FROM servers WHERE ip = ?").bind(node.vps_ip).first();
+            const remark = encodeURIComponent(`${vpsInfo ? vpsInfo.name : 'KUI'} | ${node.protocol}_${node.port}`);
+            if (node.protocol === "VLESS") subLinks.push(`vless://${node.uuid}@${node.vps_ip}:${node.port}?encryption=none&security=none&type=tcp#${remark}`);
+            else if (node.protocol === "Reality") subLinks.push(`vless://${node.uuid}@${node.vps_ip}:${node.port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${node.sni}&fp=chrome&pbk=${node.public_key}&sid=${node.short_id}&type=tcp&headerType=none#${remark}-Reality`);
+            else if (node.protocol === "Hysteria2") subLinks.push(`hysteria2://${node.uuid}@${node.vps_ip}:${node.port}/?insecure=1&sni=${node.sni}#${remark}-Hy2`);
+        }
 
-        return new Response(btoa(unescape(encodeURIComponent(subLinks.join('\n')))), { headers: { "Content-Type": "text/plain" }});
+        return new Response(btoa(unescape(encodeURIComponent(subLinks.join('\n')))), { headers: { "Content-Type": "text/plain; charset=utf-8" }});
     }
 
-    // 3. 登录接口
+    // 4. 登录接口
     if (action === "login" && method === "POST") {
         const username = await verifyAuth(request.headers.get("Authorization"), db, env);
         if (username) {
@@ -138,13 +171,14 @@ export async function onRequest(context) {
         return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // 鉴权屏障
+    // ==============================================
+    // 鉴权屏障 (以下均为面板后台操作接口)
+    // ==============================================
     const currentUser = await verifyAuth(request.headers.get("Authorization"), db, env);
     const isAdmin = currentUser === (env.ADMIN_USERNAME || "admin");
     if (!currentUser) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
-        // --- 拉取全量数据 ---
         if (action === "data") {
             const servers = (await db.prepare("SELECT * FROM servers").all()).results;
             const nodes = isAdmin ? (await db.prepare("SELECT * FROM nodes").all()).results : (await db.prepare("SELECT * FROM nodes WHERE username = ?").bind(currentUser).all()).results;
@@ -152,14 +186,12 @@ export async function onRequest(context) {
             return Response.json({ servers, nodes, users });
         }
         
-        // --- 拉取图表数据 (上次丢失的接口) ---
         if (action === "stats" && method === "GET" && isAdmin) {
             const query = `SELECT strftime('%m-%d', datetime(timestamp / 1000, 'unixepoch', 'localtime')) as day, SUM(delta_bytes) as total_bytes FROM traffic_stats WHERE ip = ? AND timestamp > ? GROUP BY day ORDER BY day ASC`;
             const { results } = await db.prepare(query).bind(url.searchParams.get("ip"), Date.now() - 604800000).all();
             return Response.json(results || []);
         }
         
-        // --- 用户管理接口 ---
         if (action === "users" && isAdmin) {
             if (method === "POST") {
                 const { username, password, traffic_limit, expire_time } = await request.json();
@@ -181,7 +213,6 @@ export async function onRequest(context) {
             }
         }
         
-        // --- 机器管理接口 (补全了 DELETE) ---
         if (action === "vps" && isAdmin) {
             if (method === "POST") {
                 const { ip, name } = await request.json();
@@ -194,7 +225,6 @@ export async function onRequest(context) {
             }
         }
 
-        // --- 节点管理接口 (补全了 PUT, DELETE) ---
         if (action === "nodes" && isAdmin) {
             if (method === "POST") {
                 const n = await request.json();
