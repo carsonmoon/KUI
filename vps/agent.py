@@ -83,7 +83,7 @@ def process_argo_nodes(configs):
     return argo_urls_to_report
 
 # ===============================================
-# 内核抓取模块 (100%兼容所有Linux) + 精准增量测速
+# 内核抓取模块 (100%兼容所有Linux)
 # ===============================================
 def get_system_status():
     global prev_cpu_total, prev_cpu_idle, prev_rx, prev_tx, prev_net_time
@@ -150,7 +150,7 @@ def get_system_status():
     return stats
 
 # ===============================================
-# 🌟 修复关键点：强制放行内部防火墙 (iptables ACCEPT)
+# 节点流量精准抓取模块 (增加防火墙规则防抖优化)
 # ===============================================
 checked_ports = set()
 
@@ -158,7 +158,7 @@ def get_port_traffic(port, protocol="tcp"):
     global checked_ports
     try:
         if port not in checked_ports:
-            # 强行插入带 ACCEPT 目标的规则，既放行又能统计流量，完美打穿 ufw/firewalld
+            # 强行插入带 ACCEPT 目标的规则，既放行又能统计流量
             check_in = f"iptables -C INPUT -p {protocol} --dport {port} -j ACCEPT"
             if subprocess.run(check_in, shell=True, stderr=subprocess.DEVNULL).returncode != 0:
                 subprocess.run(f"iptables -I INPUT -p {protocol} --dport {port} -j ACCEPT", shell=True)
@@ -168,7 +168,6 @@ def get_port_traffic(port, protocol="tcp"):
                 subprocess.run(f"iptables -I OUTPUT -p {protocol} --sport {port} -j ACCEPT", shell=True)
             checked_ports.add(port)
 
-        # 抓取包含 ACCEPT 的那行计数器
         out_in = subprocess.check_output(f"iptables -nvx -L INPUT | grep 'dpt:{port}' | grep 'ACCEPT'", shell=True).decode()
         in_bytes = sum([int(line.split()[1]) for line in out_in.strip().split('\n') if line])
 
@@ -226,7 +225,7 @@ def fetch_and_apply_configs():
     return None
 
 # ===============================================
-# Sing-box 全协议底层配置引擎
+# Sing-box 全协议底层配置引擎 (🌟已针对 Alpine 禁用 IPv6 修复)
 # ===============================================
 def build_singbox_config(nodes):
     singbox_config = {
@@ -242,15 +241,17 @@ def build_singbox_config(nodes):
         in_tag = f"in-{node['id']}"
         proto = node["protocol"]
         
+        # 🌟 核心修复：所有协议的 listen 全部从 "::" 改为 "0.0.0.0"
+        # 避免 Alpine 系统未开启 IPv6 导致的 address family 报错崩溃
         if proto == "VLESS":
             singbox_config["inbounds"].append({
-                "type": "vless", "tag": in_tag, "listen": "::", "listen_port": int(node["port"]),
+                "type": "vless", "tag": in_tag, "listen": "0.0.0.0", "listen_port": int(node["port"]),
                 "users": [{"uuid": node["uuid"]}]
             })
             
         elif proto == "Reality":
             singbox_config["inbounds"].append({
-                "type": "vless", "tag": in_tag, "listen": "::", "listen_port": int(node["port"]),
+                "type": "vless", "tag": in_tag, "listen": "0.0.0.0", "listen_port": int(node["port"]),
                 "users": [{"uuid": node["uuid"], "flow": "xtls-rprx-vision"}],
                 "tls": {
                     "enabled": True, "server_name": node["sni"],
@@ -275,21 +276,23 @@ def build_singbox_config(nodes):
 
             if proto == "Hysteria2":
                 singbox_config["inbounds"].append({
-                    "type": "hysteria2", "tag": in_tag, "listen": "::", "listen_port": int(node["port"]),
+                    "type": "hysteria2", "tag": in_tag, "listen": "0.0.0.0", "listen_port": int(node["port"]),
                     "users": [{"password": node["uuid"]}],
                     "tls": { "enabled": True, "alpn": ["h3"], "certificate_path": cert_path, "key_path": key_path }
                 })
             elif proto == "TUIC":
                 singbox_config["inbounds"].append({
-                    "type": "tuic", "tag": in_tag, "listen": "::", "listen_port": int(node["port"]),
+                    "type": "tuic", "tag": in_tag, "listen": "0.0.0.0", "listen_port": int(node["port"]),
                     "users": [{"uuid": node["uuid"], "password": node["private_key"]}],
                     "tls": { "enabled": True, "alpn": ["h3"], "certificate_path": cert_path, "key_path": key_path }
                 })
 
         elif proto == "SS2022":
+            method = node.get("sni", "2022-blake3-aes-128-gcm")
+            if not method: method = "2022-blake3-aes-128-gcm"
             singbox_config["inbounds"].append({
-                "type": "shadowsocks", "tag": in_tag, "listen": "::", "listen_port": int(node["port"]),
-                "method": node.get("sni", "2022-blake3-aes-128-gcm"),
+                "type": "shadowsocks", "tag": in_tag, "listen": "0.0.0.0", "listen_port": int(node["port"]),
+                "method": method,
                 "password": node["private_key"]
             })
 
@@ -302,12 +305,12 @@ def build_singbox_config(nodes):
             
         elif proto == "Socks5":
             singbox_config["inbounds"].append({
-                "type": "socks", "tag": in_tag, "listen": "::", "listen_port": int(node["port"]),
+                "type": "socks", "tag": in_tag, "listen": "0.0.0.0", "listen_port": int(node["port"]),
                 "users": [{"username": node["uuid"], "password": node["private_key"]}]
             })
             
         elif proto == "dokodemo-door":
-            singbox_config["inbounds"].append({ "type": "direct", "tag": in_tag, "listen": "::", "listen_port": int(node["port"]) })
+            singbox_config["inbounds"].append({ "type": "direct", "tag": in_tag, "listen": "0.0.0.0", "listen_port": int(node["port"]) })
             out_tag = f"out-{node['id']}"
             
             if node.get("relay_type") == "internal" and node.get("chain_target"):
@@ -324,40 +327,58 @@ def build_singbox_config(nodes):
     try:
         for filename in os.listdir("/opt/kui/"):
             if (filename.startswith("cert_") or filename.startswith("key_")) and filename.endswith(".pem"):
-                if filename not in active_certs: os.remove(os.path.join("/opt/kui/", filename))
-    except Exception: pass
+                if filename not in active_certs:
+                    os.remove(os.path.join("/opt/kui/", filename))
+    except Exception:
+        pass
 
     new_config_str = json.dumps(singbox_config, indent=2)
     old_config_str = ""
     if os.path.exists(SINGBOX_CONF_PATH):
-        with open(SINGBOX_CONF_PATH, "r") as f: old_config_str = f.read()
+        with open(SINGBOX_CONF_PATH, "r") as f:
+            old_config_str = f.read()
 
     if new_config_str != old_config_str:
-        with open(SINGBOX_CONF_PATH, "w") as f: f.write(new_config_str)
-        if os.path.exists("/sbin/openrc-run") or os.path.exists("/etc/alpine-release"): subprocess.run(["rc-service", "sing-box", "restart"])
-        else: subprocess.run(["systemctl", "restart", "sing-box"])
+        with open(SINGBOX_CONF_PATH, "w") as f:
+            f.write(new_config_str)
+        # 兼容 Alpine 的 OpenRC 重启机制
+        if os.path.exists("/sbin/openrc-run") or os.path.exists("/etc/alpine-release"):
+            subprocess.run(["rc-service", "sing-box", "restart"])
+        else:
+            subprocess.run(["systemctl", "restart", "sing-box"])
 
 # ===============================================
 # 极速主循环引擎 (Fast-Mode)
 # ===============================================
 if __name__ == "__main__":
     current_active_nodes = []
-    last_config_fetch = 0; last_report_time = 0; fast_mode = False
+    
+    last_config_fetch = 0
+    last_report_time = 0
+    fast_mode = False
+    
     time.sleep(1)
     
     while True:
         now = time.time()
+
         if now - last_config_fetch >= 60:
             fetched_nodes = fetch_and_apply_configs()
-            if fetched_nodes is not None: current_active_nodes = fetched_nodes
+            if fetched_nodes is not None:
+                current_active_nodes = fetched_nodes
             last_config_fetch = now
 
         target_interval = 2 if fast_mode else 15
+        
         if now - last_report_time >= target_interval:
             argo_urls = process_argo_nodes(current_active_nodes)
             res_json = report_status(current_active_nodes, argo_urls)
-            if res_json and isinstance(res_json, dict) and res_json.get("fast_mode"): fast_mode = True
-            else: fast_mode = False
+            
+            if res_json and isinstance(res_json, dict) and res_json.get("fast_mode"):
+                fast_mode = True
+            else:
+                fast_mode = False
+                
             last_report_time = time.time()
         
         time.sleep(1)
