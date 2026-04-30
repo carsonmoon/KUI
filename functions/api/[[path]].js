@@ -1,6 +1,6 @@
 // ==========================================
 // KUI Serverless 聚合网关后端 - 零配置全自动建表完全体
-// (包含：系统重命名 + 独立订阅 Token 解耦 + 心跳引擎)
+// (包含：心跳极速变频引擎 + 全自动建表/热升级 + 7大协议 + SS2022)
 // ==========================================
 
 async function sha256(text) {
@@ -164,7 +164,7 @@ export async function onRequest(context) {
     // 无鉴权或特殊鉴权接口区
     // ==============================================
 
-    // 🌟 处理前端传来的面板活跃心跳
+    // 处理前端传来的面板活跃心跳
     if (action === "ui_ping" && method === "POST") {
         if (!(await verifyAuth(request.headers.get("Authorization"), db, env))) return new Response("Unauthorized", { status: 401 });
         await db.prepare("INSERT OR REPLACE INTO sys_config (key, val, ts) VALUES ('ui_active', '1', ?)").bind(Date.now()).run();
@@ -212,7 +212,7 @@ export async function onRequest(context) {
         
         if (stmts.length > 0) await db.batch(stmts);
 
-        // 🌟 将心跳检测结果传回探针，决定探针下一秒是否挂入“极速2秒挡”
+        // 将心跳检测结果传回探针，决定探针下一秒是否挂入“极速2秒挡”
         let fastMode = false;
         try {
             const uiActive = await db.prepare("SELECT ts FROM sys_config WHERE key = 'ui_active'").first();
@@ -261,7 +261,7 @@ export async function onRequest(context) {
         return Response.json({ success: true, configs: machineNodes });
     }
 
-    // 全量聚合订阅接口 (动态拼接全协议)
+    // 全量聚合订阅接口 (动态拼接全协议，包含 SS2022)
     if (action === "sub" && method === "GET") {
         const ip = url.searchParams.get("ip");
         const reqUser = url.searchParams.get("user");
@@ -270,7 +270,7 @@ export async function onRequest(context) {
 
         let isValid = false;
         
-        // 🌟 订阅令牌解耦验证
+        // 订阅令牌解耦验证
         if (reqUser === adminUser) {
             let adminSubToken = await sha256(env.ADMIN_PASSWORD || "admin");
             try { 
@@ -329,6 +329,9 @@ export async function onRequest(context) {
                 subLinks.push(`socks5://${auth}@${node.vps_ip}:${node.port}#${remark}-Socks5`);
             } else if (node.protocol === "VLESS-Argo" && !node.sni.includes('等待')) {
                 subLinks.push(`vless://${node.uuid}@${node.sni}:443?encryption=none&security=tls&type=ws&host=${node.sni}&path=%2F#${remark}-Argo`);
+            } else if (node.protocol === "SS2022") {
+                const auth = btoa(`${node.sni}:${node.private_key}`);
+                subLinks.push(`ss://${auth}@${node.vps_ip}:${node.port}#${remark}-SS2022`);
             }
         }
 
@@ -355,18 +358,23 @@ export async function onRequest(context) {
     try {
         // [GET] 面板核心数据拉取
         if (action === "data") {
+            // 🌟 终极兜底：只要管理员打开面板或刷新数据，强制进行一次数据库热升级检查
+            if (isAdmin) {
+                await ensureDbSchema(db);
+            }
+
             const servers = (await db.prepare("SELECT * FROM servers").all()).results;
             const nodes = isAdmin ? (await db.prepare("SELECT * FROM nodes").all()).results : (await db.prepare("SELECT * FROM nodes WHERE username = ?").bind(currentUser).all()).results;
             const users = isAdmin ? (await db.prepare("SELECT * FROM users").all()).results : (await db.prepare("SELECT * FROM users WHERE username = ?").bind(currentUser).all()).results;
             
-            // 🌟 动态返回系统站点名称
+            // 动态返回系统站点名称
             let siteTitle = "Cluster Gateway";
             try { 
                 const r = await db.prepare("SELECT val FROM sys_config WHERE key='site_title'").first(); 
                 if(r && r.val) siteTitle = r.val; 
             } catch(e){}
             
-            // 🌟 返回专属订阅 Token 给前端渲染
+            // 返回专属订阅 Token 给前端渲染
             let mySubToken = "";
             if (isAdmin) { 
                 try { 
@@ -381,14 +389,14 @@ export async function onRequest(context) {
             return Response.json({ servers, nodes, users, siteTitle, mySubToken });
         }
         
-        // 🌟 [POST] 管理员修改全局系统名称
+        // 管理员修改全局系统名称
         if (action === "settings" && method === "POST" && isAdmin) {
             const { site_title } = await request.json();
             await db.prepare("INSERT OR REPLACE INTO sys_config (key, val, ts) VALUES ('site_title', ?, ?)").bind(site_title, Date.now()).run();
             return Response.json({ success: true });
         }
 
-        // 🌟 [PUT] 普通用户修改个人密码
+        // 普通用户修改个人密码
         if (action === "user" && params.path[1] === "password" && method === "PUT") {
             const { password } = await request.json();
             if (isAdmin) {
@@ -399,7 +407,7 @@ export async function onRequest(context) {
             return Response.json({ success: true });
         }
 
-        // 🌟 [PUT] 系统重置订阅独立 Token
+        // 系统重置订阅独立 Token
         if (action === "user" && params.path[1] === "sub_token" && method === "PUT") {
             const newToken = crypto.randomUUID();
             if (isAdmin) {
@@ -423,7 +431,15 @@ export async function onRequest(context) {
                 const { username, password, traffic_limit, expire_time } = await request.json();
                 const hash = await sha256(password);
                 const subToken = crypto.randomUUID(); // 为新用户自动生成独立的订阅 Token
-                await db.prepare("INSERT INTO users (username, password, traffic_limit, expire_time, sub_token) VALUES (?, ?, ?, ?, ?)").bind(username, hash, traffic_limit, expire_time, subToken).run();
+                
+                try {
+                    await db.prepare("INSERT INTO users (username, password, traffic_limit, expire_time, sub_token) VALUES (?, ?, ?, ?, ?)").bind(username, hash, traffic_limit, expire_time, subToken).run();
+                } catch (e) {
+                    // 🌟 抢救机制：如果字段不存在导致插入失败，强行热升级数据库后重试
+                    await ensureDbSchema(db);
+                    await db.prepare("INSERT INTO users (username, password, traffic_limit, expire_time, sub_token) VALUES (?, ?, ?, ?, ?)").bind(username, hash, traffic_limit, expire_time, subToken).run();
+                }
+                
                 return Response.json({ success: true });
             }
             if (method === "PUT") {
