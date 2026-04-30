@@ -1,6 +1,6 @@
 // ==========================================
 // KUI Serverless 聚合网关后端 - 零配置全自动建表完全体
-// (包含：全自动建表/热升级 + 7大协议 + Argo全自动 + TUIC修复 + 探针高阶监控吸收)
+// (包含：心跳极速变频引擎 + 全自动建表/热升级 + 7大协议)
 // ==========================================
 
 async function sha256(text) {
@@ -8,9 +8,8 @@ async function sha256(text) {
     return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// 🌟 终极进化：真正的零配置部署，全自动生成表结构与索引，并无缝兼容老版本热升级
+// 🌟 终极进化：全自动生成表结构与索引，无缝兼容老版本热升级
 async function ensureDbSchema(db) {
-    // 1. 全自动初始化所有表结构 (新用户首次登录或探针心跳时触发)
     const initQueries = [
         `CREATE TABLE IF NOT EXISTS servers (
             ip TEXT PRIMARY KEY,
@@ -63,32 +62,39 @@ async function ensureDbSchema(db) {
             timestamp INTEGER NOT NULL,
             FOREIGN KEY(ip) REFERENCES servers(ip) ON DELETE CASCADE
         )`,
-        `CREATE INDEX IF NOT EXISTS idx_traffic_ip_time ON traffic_stats(ip, timestamp)`
+        `CREATE INDEX IF NOT EXISTS idx_traffic_ip_time ON traffic_stats(ip, timestamp)`,
+        
+        // 🌟 新增：系统配置表，用于记录前端面板的活跃心跳
+        `CREATE TABLE IF NOT EXISTS sys_config (
+            key TEXT PRIMARY KEY, 
+            val TEXT, 
+            ts INTEGER
+        )`
     ];
 
     for (let query of initQueries) {
         try { await db.prepare(query).run(); } catch (e) { /* 忽略已存在的报错 */ }
     }
 
-    // 2. 向下兼容老版本用户 (热升级：如果表已存在但缺字段，则自动追加)
+    // 热升级：兼容老版本，自动补齐字段
     try { await db.prepare("SELECT username FROM nodes LIMIT 1").first(); } 
     catch (e) { try { await db.prepare("ALTER TABLE nodes ADD COLUMN username TEXT DEFAULT 'admin'").run(); } catch(e){} }
 
     try { await db.prepare("SELECT disk FROM servers LIMIT 1").first(); } 
     catch (e) {
         const newCols = [
-            'disk INTEGER DEFAULT 0', 
-            'load TEXT DEFAULT ""', 
-            'uptime TEXT DEFAULT ""', 
-            'net_in_speed INTEGER DEFAULT 0', 
-            'net_out_speed INTEGER DEFAULT 0', 
-            'tcp_conn INTEGER DEFAULT 0', 
-            'udp_conn INTEGER DEFAULT 0'
+            'disk INTEGER DEFAULT 0', 'load TEXT DEFAULT ""', 'uptime TEXT DEFAULT ""', 
+            'net_in_speed INTEGER DEFAULT 0', 'net_out_speed INTEGER DEFAULT 0', 
+            'tcp_conn INTEGER DEFAULT 0', 'udp_conn INTEGER DEFAULT 0'
         ];
         for (let col of newCols) { 
             try { await db.prepare(`ALTER TABLE servers ADD COLUMN ${col}`).run(); } catch(err){} 
         }
     }
+
+    // 热升级：兼容没有 sys_config 表的老用户
+    try { await db.prepare("SELECT val FROM sys_config LIMIT 1").first(); } 
+    catch (e) { try { await db.prepare("CREATE TABLE IF NOT EXISTS sys_config (key TEXT PRIMARY KEY, val TEXT, ts INTEGER)").run(); } catch(err){} }
 }
 
 async function verifyAuth(authHeader, db, env) {
@@ -129,7 +135,15 @@ export async function onRequest(context) {
     const action = params.path ? params.path[0] : ''; 
     const db = env.DB; 
 
-    // [1] Agent 探针上报接口 (带自我热修复机制)
+    // 🌟 新增：处理前端传来的面板活跃心跳
+    if (action === "ui_ping" && method === "POST") {
+        if (!(await verifyAuth(request.headers.get("Authorization"), db, env))) return new Response("Unauthorized", { status: 401 });
+        // 记录当前时间戳，表示面板正处于打开状态
+        await db.prepare("INSERT OR REPLACE INTO sys_config (key, val, ts) VALUES ('ui_active', '1', ?)").bind(Date.now()).run();
+        return Response.json({ success: true });
+    }
+
+    // [1] Agent 探针上报接口 (带自我热修复机制 & 极速模式下发)
     if (action === "report" && method === "POST") {
         if (!(await verifyAuth(request.headers.get("Authorization"), db, env))) return new Response("Unauthorized", { status: 401 });
         const data = await request.json(); 
@@ -165,7 +179,18 @@ export async function onRequest(context) {
 
         if (totalDelta > 0) stmts.push(db.prepare("INSERT INTO traffic_stats (ip, delta_bytes, timestamp) VALUES (?, ?, ?)").bind(data.ip, totalDelta, nowMs));
         if (stmts.length > 0) await db.batch(stmts);
-        return Response.json({ success: true });
+
+        // 🌟 新增：将心跳检测结果传回探针，决定探针下一秒是否挂入“极速2秒挡”
+        let fastMode = false;
+        try {
+            const uiActive = await db.prepare("SELECT ts FROM sys_config WHERE key = 'ui_active'").first();
+            // 如果面板在 20 秒内发过心跳，说明用户正在盯着屏幕看，激活极速模式！
+            if (uiActive && (nowMs - uiActive.ts < 20000)) {
+                fastMode = true;
+            }
+        } catch(e) {}
+
+        return Response.json({ success: true, fast_mode: fastMode });
     }
 
     // [2] Agent 探针拉取配置接口
