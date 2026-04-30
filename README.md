@@ -4,7 +4,7 @@
 ![Version](https://img.shields.io/badge/version-v1.0-green.svg)
 ![Architecture](https://img.shields.io/badge/architecture-Serverless-orange.svg)
 
-KUI 是一款基于 **Cloudflare Pages + D1 数据库** 构建的轻量级、无服务器（Serverless）多节点代理聚合管理面板。配合极简的 Python 探针，能够实现单机/多机节点的一键接入、流量监控、多用户管理以及 **FSCARMEN 级别的 8 合 1 极速协议部署**。
+KUI 是一款基于 **Cloudflare Pages + D1 数据库** 构建的轻量级、无服务器（Serverless）多节点代理聚合管理面板。配合极简的 Python 探针，能够实现单机/多机节点的一键接入、流量监控、多用户管理以及 **极速协议部署**。
 
 特别感谢@FSCARMEN https://github.com/fscarmen/sing-box 加速实现多协议的部署
 ---
